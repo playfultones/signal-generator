@@ -41,6 +41,8 @@ def generate_log_sweep(sample_rate: int, duration: float) -> np.ndarray:
     """
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     signal = chirp(t, f0=SWEEP_FREQ_START, f1=SWEEP_FREQ_END, t1=duration, method='logarithmic')
+
+    signal = signal / (np.max(np.abs(signal)) + 1e-10)
     return signal
 
 
@@ -58,7 +60,7 @@ def generate_white_noise(sample_rate: int, duration: float) -> np.ndarray:
     num_samples = int(sample_rate * duration)
     signal = np.random.randn(num_samples)
 
-    signal = signal / (np.max(np.abs(signal)) + 1e-10) * 0.95
+    signal = signal / (np.max(np.abs(signal)) + 1e-10)
     return signal
 
 
@@ -92,7 +94,7 @@ def generate_pink_noise(sample_rate: int, duration: float) -> np.ndarray:
     signal = np.fft.irfft(fft_filtered, n=num_samples)
     
 
-    signal = signal / (np.max(np.abs(signal)) + 1e-10) * 0.95
+    signal = signal / (np.max(np.abs(signal)) + 1e-10)
     return signal
 
 
@@ -119,7 +121,7 @@ def generate_impulse(sample_rate: int, duration: float) -> np.ndarray:
     for i in range(int(duration / IMPULSE_INTERVAL)):
         idx = offset_samples + i * impulse_interval_samples
         if idx < num_samples:
-            signal[idx] = 0.95  # Positive impulse with headroom
+            signal[idx] = 1.0  # Positive impulse at unity (scaled by peak level later)
     
     return signal
 
@@ -180,6 +182,19 @@ def to_float32(signal: np.ndarray) -> np.ndarray:
     return signal.astype(np.float32)
 
 
+def dbfs_to_linear(dbfs: float) -> float:
+    """
+    Convert dBFS to linear amplitude.
+    
+    Args:
+        dbfs: Level in dBFS (0 = full scale, negative values = quieter)
+    
+    Returns:
+        Linear amplitude multiplier (0 to 1)
+    """
+    return 10 ** (dbfs / 20)
+
+
 def generate_filename(signal_type: str, sample_rate: int, duration: float, channels: str) -> str:
     """
     Generate descriptive filename encoding all parameters.
@@ -214,10 +229,12 @@ Signal Types:
   impulse      - Impulse clicks at 1-second intervals (phase/group delay)
 
 Examples:
-  %(prog)s                                    # Default: 10s log sweep, 48kHz, mono
+  %(prog)s                                    # Default: 10s log sweep, 48kHz, mono, -18dBFS
   %(prog)s -t impulse -d 5                    # 5s impulse clicks
   %(prog)s -t pink_noise -r 96000 -c stereo   # 96kHz stereo pink noise
   %(prog)s -t white_noise -o ./test_signals/  # White noise to specific folder
+  %(prog)s -t log_sweep -p -12                # Log sweep at -12 dBFS peak
+  %(prog)s -p 0                               # Full scale (0 dBFS) output
         """
     )
     
@@ -262,6 +279,14 @@ Examples:
         help='Output folder (default: current directory)'
     )
     
+    parser.add_argument(
+        '-p', '--peak-level',
+        type=float,
+        default=-18.0,
+        metavar='DBFS',
+        help='Peak level in dBFS (default: -18, range: -60 to 0)'
+    )
+    
     args = parser.parse_args()
     
 
@@ -273,6 +298,11 @@ Examples:
 
     if args.duration <= 0 or args.duration > 3600:
         print(f"Error: Duration {args.duration} out of range (0-3600 seconds)", 
+              file=sys.stderr)
+        sys.exit(1)
+    
+    if args.peak_level < -60 or args.peak_level > 0:
+        print(f"Error: Peak level {args.peak_level} out of range (-60 to 0 dBFS)", 
               file=sys.stderr)
         sys.exit(1)
     
@@ -295,8 +325,13 @@ Examples:
     print(f"  Sample rate: {args.sample_rate} Hz")
     print(f"  Duration: {args.duration} s")
     print(f"  Channels: {args.channels}")
+    print(f"  Peak level: {args.peak_level} dBFS")
     
     signal = generator(args.sample_rate, args.duration)
+    
+
+    peak_amplitude = dbfs_to_linear(args.peak_level)
+    signal = signal * peak_amplitude
     
 
     if args.signal_type != 'impulse':

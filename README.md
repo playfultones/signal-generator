@@ -33,12 +33,13 @@ python signal_generator.py [options]
 | `-r, --sample-rate` | `48000` | Sample rate in Hz |
 | `-d, --duration` | `10` | Duration in seconds |
 | `-c, --channels` | `mono` | Output channels: `mono` or `stereo` |
+| `-p, --peak-level` | `-18` | Peak level in dBFS (range: -60 to 0) |
 | `-o, --output` | `.` | Output folder |
 
 ### Examples
 
 ```bash
-# Default: 10s log sweep at 48kHz mono
+# Default: 10s log sweep at 48kHz mono, -18 dBFS peak
 python signal_generator.py
 
 # 5-second impulse clicks
@@ -50,6 +51,12 @@ python signal_generator.py -t pink_noise -r 96000 -c stereo
 # White noise to specific folder
 python signal_generator.py -t white_noise -o ./test_signals/
 
+# Log sweep at -12 dBFS peak level
+python signal_generator.py -t log_sweep -p -12
+
+# Full scale (0 dBFS) output
+python signal_generator.py -p 0
+
 # Full measurement set
 python signal_generator.py -t log_sweep -d 20
 python signal_generator.py -t pink_noise -d 10
@@ -59,6 +66,7 @@ python signal_generator.py -t impulse -d 5
 ## Output
 
 - **Format**: 32-bit float WAV
+- **Peak level**: -18 dBFS by default (configurable via `-p`)
 - **Fades**: 20ms cosine fade-in/fade-out (except impulse)
 - **Filename**: `{type}_{sample_rate}_{duration}s_{channels}.wav`
 
