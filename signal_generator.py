@@ -3,7 +3,7 @@
 Signal Generator for Reference Signal Capture
 
 Generates test signals for acoustic measurement and analysis:
-- Log sine sweep (20Hz-20kHz): Frequency response measurement
+- Log sine sweep: Frequency response measurement (configurable range, default 10Hz to Nyquist-500Hz)
 - White noise: Broadband verification, FFT analysis
 - Pink noise: Broadband verification with 1/f spectrum
 - Impulse clicks: Phase response / group delay check
@@ -18,31 +18,54 @@ from pathlib import Path
 
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import chirp
 
 
 # Constants
-FADE_DURATION_MS = 20  # Fade in/out duration in milliseconds
-SWEEP_FREQ_START = 20  # Hz
-SWEEP_FREQ_END = 20000  # Hz
+FADE_DURATION_MS = 10  # Fade in/out duration in milliseconds
+SWEEP_FREQ_START = 10  # Hz - start low to capture sub-bass
+SWEEP_FREQ_END_OFFSET = 500  # Hz below Nyquist - headroom for anti-aliasing
 IMPULSE_INTERVAL = 1.0  # Seconds between impulses
 
 
-def generate_log_sweep(sample_rate: int, duration: float) -> np.ndarray:
+def generate_log_sweep(sample_rate: int, duration: float, 
+                       f_start: float = None, f_end: float = None) -> np.ndarray:
     """
-    Generate logarithmic sine sweep from 20Hz to 20kHz.
+    Generate logarithmic sine sweep with full bandwidth coverage.
+    
+    Uses direct phase accumulation method for accurate frequency sweep
+    all the way to near-Nyquist frequencies.
     
     Args:
         sample_rate: Sample rate in Hz
         duration: Duration in seconds
+        f_start: Start frequency in Hz (default: 10 Hz)
+        f_end: End frequency in Hz (default: Nyquist - 500 Hz)
     
     Returns:
         Normalized signal array [-1, 1]
     """
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    signal = chirp(t, f0=SWEEP_FREQ_START, f1=SWEEP_FREQ_END, t1=duration, method='logarithmic')
+    if f_start is None:
+        f_start = SWEEP_FREQ_START
+    if f_end is None:
+        f_end = sample_rate / 2 - SWEEP_FREQ_END_OFFSET
+    
 
+    nyquist = sample_rate / 2
+    if f_end > nyquist * 0.99:
+        f_end = nyquist * 0.99
+    
+    n_samples = int(sample_rate * duration)
+    t = np.arange(n_samples) / sample_rate
+    
+    k = f_end / f_start
+    L = duration * f_start / np.log(k)
+    
+    phase = 2 * np.pi * L * (np.power(k, t / duration) - 1)
+    
+    signal = np.sin(phase)
+    
     signal = signal / (np.max(np.abs(signal)) + 1e-10)
+    
     return signal
 
 
@@ -195,7 +218,8 @@ def dbfs_to_linear(dbfs: float) -> float:
     return 10 ** (dbfs / 20)
 
 
-def generate_filename(signal_type: str, sample_rate: int, duration: float, channels: str) -> str:
+def generate_filename(signal_type: str, sample_rate: int, duration: float, channels: str,
+                      f_start: float = None, f_end: float = None) -> str:
     """
     Generate descriptive filename encoding all parameters.
     
@@ -204,6 +228,8 @@ def generate_filename(signal_type: str, sample_rate: int, duration: float, chann
         sample_rate: Sample rate in Hz
         duration: Duration in seconds
         channels: 'mono' or 'stereo'
+        f_start: Start frequency for sweeps (optional)
+        f_end: End frequency for sweeps (optional)
     
     Returns:
         Filename string (without path)
@@ -214,6 +240,12 @@ def generate_filename(signal_type: str, sample_rate: int, duration: float, chann
     else:
         duration_str = f"{duration:.1f}s"
     
+
+    if signal_type == 'log_sweep' and f_start is not None and f_end is not None:
+        f_start_str = f"{int(f_start)}" if f_start >= 10 else f"{f_start:.1f}"
+        f_end_str = f"{int(f_end)}" if f_end >= 1000 else f"{f_end:.0f}"
+        return f"{signal_type}_{f_start_str}hz-{f_end_str}hz_{sample_rate}_{duration_str}_{channels}.wav"
+    
     return f"{signal_type}_{sample_rate}_{duration_str}_{channels}.wav"
 
 
@@ -223,7 +255,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Signal Types:
-  log_sweep    - Logarithmic sine sweep 20Hz-20kHz (frequency response)
+  log_sweep    - Logarithmic sine sweep (default: 10Hz to Nyquist-500Hz)
   white_noise  - White noise burst (broadband verification)
   pink_noise   - Pink noise burst with 1/f spectrum
   impulse      - Impulse clicks at 1-second intervals (phase/group delay)
@@ -235,6 +267,8 @@ Examples:
   %(prog)s -t white_noise -o ./test_signals/  # White noise to specific folder
   %(prog)s -t log_sweep -p -12                # Log sweep at -12 dBFS peak
   %(prog)s -p 0                               # Full scale (0 dBFS) output
+  %(prog)s --f-start 20 --f-end 20000         # Classic 20Hz-20kHz sweep
+  %(prog)s -r 96000 --f-end 47500             # 96kHz sweep to near-Nyquist
         """
     )
     
@@ -287,6 +321,22 @@ Examples:
         help='Peak level in dBFS (default: -18, range: -60 to 0)'
     )
     
+    parser.add_argument(
+        '--f-start',
+        type=float,
+        default=None,
+        metavar='HZ',
+        help='Sweep start frequency in Hz (default: 10 Hz)'
+    )
+    
+    parser.add_argument(
+        '--f-end',
+        type=float,
+        default=None,
+        metavar='HZ',
+        help='Sweep end frequency in Hz (default: Nyquist - 500 Hz)'
+    )
+    
     args = parser.parse_args()
     
 
@@ -311,15 +361,21 @@ Examples:
     output_path.mkdir(parents=True, exist_ok=True)
     
 
-    generators = {
-        'log_sweep': generate_log_sweep,
-        'white_noise': generate_white_noise,
-        'pink_noise': generate_pink_noise,
-        'impulse': generate_impulse,
-    }
+
+    f_start = args.f_start if args.f_start is not None else SWEEP_FREQ_START
+    f_end = args.f_end if args.f_end is not None else (args.sample_rate / 2 - SWEEP_FREQ_END_OFFSET)
     
-    generator = generators[args.signal_type]
+
+    nyquist = args.sample_rate / 2
+    if f_end > nyquist:
+        print(f"Warning: f_end ({f_end} Hz) exceeds Nyquist ({nyquist} Hz), clamping to {nyquist * 0.99:.0f} Hz",
+              file=sys.stderr)
+        f_end = nyquist * 0.99
     
+    if f_start >= f_end:
+        print(f"Error: f_start ({f_start} Hz) must be less than f_end ({f_end} Hz)",
+              file=sys.stderr)
+        sys.exit(1)
 
     print(f"Generating {args.signal_type}...")
     print(f"  Sample rate: {args.sample_rate} Hz")
@@ -327,7 +383,18 @@ Examples:
     print(f"  Channels: {args.channels}")
     print(f"  Peak level: {args.peak_level} dBFS")
     
-    signal = generator(args.sample_rate, args.duration)
+    if args.signal_type == 'log_sweep':
+        print(f"  Frequency range: {f_start:.1f} Hz - {f_end:.1f} Hz")
+        signal = generate_log_sweep(args.sample_rate, args.duration, f_start, f_end)
+    elif args.signal_type == 'white_noise':
+        signal = generate_white_noise(args.sample_rate, args.duration)
+    elif args.signal_type == 'pink_noise':
+        signal = generate_pink_noise(args.sample_rate, args.duration)
+    elif args.signal_type == 'impulse':
+        signal = generate_impulse(args.sample_rate, args.duration)
+    else:
+        print(f"Error: Unknown signal type {args.signal_type}", file=sys.stderr)
+        sys.exit(1)
     
 
     peak_amplitude = dbfs_to_linear(args.peak_level)
@@ -345,7 +412,11 @@ Examples:
     signal_out = to_float32(signal)
     
 
-    filename = generate_filename(args.signal_type, args.sample_rate, args.duration, args.channels)
+    if args.signal_type == 'log_sweep':
+        filename = generate_filename(args.signal_type, args.sample_rate, args.duration, 
+                                     args.channels, f_start, f_end)
+    else:
+        filename = generate_filename(args.signal_type, args.sample_rate, args.duration, args.channels)
     filepath = output_path / filename
     
 
